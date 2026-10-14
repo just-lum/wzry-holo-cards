@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>王者荣耀 · 原皮典藏 · 全息卡</title>
+<style>
+:root{--bg:#0f1013;--panel:#17191d;--line:#ffffff1a;--ink:#dfe6ee;--accent:#d6ef9d}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+  font-family:system-ui,"Microsoft YaHei",sans-serif;overflow:hidden}
+body{display:grid;grid-template-columns:298px 1fr}
+#list{overflow-y:auto;border-right:1px solid var(--line);background:var(--panel)}
+#list h1{font-size:13px;margin:0;padding:13px 16px;border-bottom:1px solid var(--line);
+  font-weight:600;letter-spacing:.08em;position:sticky;top:0;background:var(--panel);z-index:2}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;padding:9px}
+.item{cursor:pointer;border:1px solid transparent;border-radius:7px;overflow:hidden;
+  background:#1e2126;text-align:center;padding-bottom:4px}
+.item:hover{border-color:#ffffff2e}
+.item.sel{border-color:var(--accent);background:#232a22}
+.item img{width:100%;display:block;aspect-ratio:5/7;object-fit:cover;object-position:top}
+.item b{display:block;font-size:11px;font-weight:500;margin-top:3px}
+.item span{display:block;font-size:9px;opacity:.55;margin-top:1px}
+main{position:relative;display:grid;place-items:center;overflow:hidden}
+.room{position:absolute;inset:0;background:radial-gradient(ellipse at 50% 45%,#25282b,#101113 80%)}
+.stage{position:relative;width:100%;height:100%;display:grid;place-items:center;perspective:1400px}
+.card{position:relative;width:min(66vw,430px,calc(70vh / 1.486));aspect-ratio:1 / 1.486;
+  transform-style:preserve-3d;cursor:grab;touch-action:none;user-select:none;
+  transform:rotateX(-5deg) rotateY(-12deg)}
+.card:active{cursor:grabbing}
+.face{position:absolute;inset:0;border-radius:4.5%/3.2%;backface-visibility:hidden;
+  -webkit-backface-visibility:hidden;box-shadow:0 0 0 1px #202329,0 30px 65px #000b}
+.front{overflow:visible;background:transparent}
+.front canvas{position:absolute;width:160%;height:160%;left:-30%;top:-30%;
+  border-radius:0;pointer-events:none}
+.back{visibility:hidden;transform:rotateY(180deg);background:#13216a;overflow:hidden}
+.back img{width:100%;height:100%;object-fit:fill;display:block}
+.hud{position:absolute;top:14px;left:50%;transform:translateX(-50%);text-align:center;pointer-events:none}
+.hud b{font-size:19px;letter-spacing:.22em;text-shadow:0 2px 12px #000a}
+.hud span{display:block;font-size:11px;opacity:.62;margin-top:3px;letter-spacing:.1em}
+.controls{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);
+  width:min(430px,92vw);display:grid;grid-template-columns:auto 1fr 56px;gap:10px;
+  align-items:center;padding:13px 16px;background:#1b1e22ee;border:1px solid var(--line);
+  border-radius:14px;font-size:12px}
+.controls input[type=range]{width:100%;accent-color:var(--accent)}
+.controls output{text-align:right;font-variant-numeric:tabular-nums}
+.controls .row{grid-column:1/-1;display:flex;gap:8px;margin-top:2px}
+.controls button{flex:1;min-height:32px;border:1px solid #ffffff25;border-radius:8px;
+  background:#2b3036;color:inherit;font:inherit;cursor:pointer}
+.controls button:hover{background:#343a42}
+#status{position:absolute;bottom:104px;left:50%;transform:translateX(-50%);
+  font-size:12px;opacity:.72;pointer-events:none;text-shadow:0 1px 6px #000}
+@media(max-width:820px){
+  body{grid-template-columns:1fr;grid-template-rows:168px 1fr}
+  #list{border-right:0;border-bottom:1px solid var(--line)}
+  .grid{grid-template-columns:repeat(6,1fr)}
+  .card{width:min(84vw,calc(62vh / 1.486))}
+}
+</style>
+</head>
+<body>
+<aside id="list">
+  <h1>王者荣耀 · 原皮典藏 · 全息卡</h1>
+  <div class="grid" id="grid"></div>
+</aside>
+<main>
+  <div class="room"></div>
+  <div class="stage">
+    <div class="card" id="card">
+      <div class="face front"><canvas id="cv"></canvas></div>
+      <div class="face back"><img id="backimg" alt="卡片背面"></div>
+    </div>
+  </div>
+  <div class="hud"><b id="tname">—</b><span id="tmeta">点击左侧任意一张开始</span></div>
+  <div class="controls">
+    <label for="depth">Depth</label>
+    <input id="depth" type="range" min="-3" max="3" step="0.05" value="0">
+    <output id="odepth">0.00×</output>
+    <label for="glow">Contour</label>
+    <input id="glow" type="range" min="0" max="3" step="0.05" value="0.15">
+    <output id="oglow">0.15×</output>
+    <div class="row">
+      <button id="flip">翻转</button>
+      <button id="recenter">Recenter</button>
+    </div>
+  </div>
+  <div id="status"></div>
+</main>
+<script src="viewer/renderer.js"></script>
+<script>
+window.addEventListener('error', function (e) {
+    var s = document.getElementById('status');
+    if (s) s.textContent = '脚本错误：' + (e.message || e.type);
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var s = document.getElementById('status');
+    if (s) s.textContent = '加载失败：' + (e.reason && e.reason.message || e.reason);
+  });
+(async () => {
+  // file:// 下浏览器不允许把本地图片当 WebGL 纹理（texImage2D 抛
+  // "cross-origin data"），卡片必然渲染不出来。提前说清楚，
+  // 免得页面看起来像"什么都没做"。
+  if (location.protocol === 'file:') {
+    var s0 = document.getElementById('status');
+    if (s0) s0.textContent = '请用 http 打开：http://127.0.0.1:8796/index.html';
+  }
+  const V = '?v=1790546400';
+  const grid = document.getElementById('grid');
+  const card = document.getElementById('card');
+  const front = card.querySelector('.front');
+  const back = card.querySelector('.back');
+  const status = document.getElementById('status');
+  const tname = document.getElementById('tname');
+  const tmeta = document.getElementById('tmeta');
+  document.getElementById('backimg').src = 'shared/back.webp' + V;
+  const heroes = [{"no": 1, "key": "159_朵莉亚", "name": "朵莉亚", "title": "人鱼之歌", "edition": "No. 001 / 130"}, {"no": 2, "key": "105_廉颇", "name": "廉颇", "title": "正义爆轰", "edition": "No. 002 / 130"}, {"no": 3, "key": "106_小乔", "name": "小乔", "title": "恋之微风", "edition": "No. 003 / 130"}, {"no": 4, "key": "107_赵云", "name": "赵云", "title": "苍天翔龙", "edition": "No. 004 / 130"}, {"no": 5, "key": "108_墨子", "name": "墨子", "title": "和平守望", "edition": "No. 005 / 130"}, {"no": 6, "key": "109_妲己", "name": "妲己", "title": "魅力之狐", "edition": "No. 006 / 130"}, {"no": 7, "key": "110_嬴政", "name": "嬴政", "title": "王者独尊", "edition": "No. 007 / 130"}, {"no": 8, "key": "111_孙尚香", "name": "孙尚香", "title": "千金重弩", "edition": "No. 008 / 130"}, {"no": 9, "key": "112_鲁班七号", "name": "鲁班七号", "title": "机关造物", "edition": "No. 009 / 130"}, {"no": 10, "key": "113_庄周", "name": "庄周", "title": "逍遥梦幻", "edition": "No. 010 / 130"}, {"no": 11, "key": "114_刘禅", "name": "刘禅", "title": "暴走机关", "edition": "No. 011 / 130"}, {"no": 12, "key": "115_高渐离", "name": "高渐离", "title": "叛逆吟游", "edition": "No. 012 / 130"}, {"no": 13, "key": "116_阿轲", "name": "阿轲", "title": "信念之刃", "edition": "No. 013 / 130"}, {"no": 14, "key": "117_钟无艳", "name": "钟无艳", "title": "野蛮之锤", "edition": "No. 014 / 130"}, {"no": 15, "key": "118_孙膑", "name": "孙膑", "title": "逆流之时", "edition": "No. 015 / 130"}, {"no": 16, "key": "119_扁鹊", "name": "扁鹊", "title": "善恶怪医", "edition": "No. 016 / 130"}, {"no": 17, "key": "167_孙悟空", "name": "孙悟空", "title": "齐天大圣", "edition": "No. 017 / 130"}, {"no": 18, "key": "549_心魔六耳", "name": "心魔六耳", "title": "孙悟空命格", "edition": "No. 018 / 130"}, {"no": 19, "key": "120_白起", "name": "白起", "title": "最终兵器", "edition": "No. 019 / 130"}, {"no": 20, "key": "121_芈月", "name": "芈月", "title": "永恒之月", "edition": "No. 020 / 130"}, {"no": 21, "key": "123_吕布", "name": "吕布", "title": "无双之魔", "edition": "No. 021 / 130"}, {"no": 22, "key": "124_周瑜", "name": "周瑜", "title": "铁血都督", "edition": "No. 022 / 130"}, {"no": 23, "key": "126_夏侯惇", "name": "夏侯惇", "title": "不羁之风", "edition": "No. 023 / 130"}, {"no": 24, "key": "127_甄姬", "name": "甄姬", "title": "洛神降临", "edition": "No. 024 / 130"}, {"no": 25, "key": "128_曹操", "name": "曹操", "title": "鲜血枭雄", "edition": "No. 025 / 130"}, {"no": 26, "key": "129_典韦", "name": "典韦", "title": "狂战士", "edition": "No. 026 / 130"}, {"no": 27, "key": "130_宫本武藏", "name": "宫本武藏", "title": "剑圣", "edition": "No. 027 / 130"}, {"no": 28, "key": "131_李白", "name": "李白", "title": "青莲剑仙", "edition": "No. 028 / 130"}, {"no": 29, "key": "132_马可波罗", "name": "马可波罗", "title": "远游之枪", "edition": "No. 029 / 130"}, {"no": 30, "key": "133_狄仁杰", "name": "狄仁杰", "title": "断案大师", "edition": "No. 030 / 130"}, {"no": 31, "key": "134_达摩", "name": "达摩", "title": "拳僧", "edition": "No. 031 / 130"}, {"no": 32, "key": "135_项羽", "name": "项羽", "title": "霸王", "edition": "No. 032 / 130"}, {"no": 33, "key": "136_武则天", "name": "武则天", "title": "女帝", "edition": "No. 033 / 130"}, {"no": 34, "key": "139_老夫子", "name": "老夫子", "title": "万古长明", "edition": "No. 034 / 130"}, {"no": 35, "key": "140_关羽", "name": "关羽", "title": "一骑当千", "edition": "No. 035 / 130"}, {"no": 36, "key": "141_貂蝉", "name": "貂蝉", "title": "绝世舞姬", "edition": "No. 036 / 130"}, {"no": 37, "key": "142_安琪拉", "name": "安琪拉", "title": "暗夜萝莉", "edition": "No. 037 / 130"}, {"no": 38, "key": "144_程咬金", "name": "程咬金", "title": "热烈之斧", "edition": "No. 038 / 130"}, {"no": 39, "key": "146_露娜", "name": "露娜", "title": "月光之女", "edition": "No. 039 / 130"}, {"no": 40, "key": "148_姜子牙", "name": "姜子牙", "title": "封神者", "edition": "No. 040 / 130"}, {"no": 41, "key": "149_刘邦", "name": "刘邦", "title": "双面君主", "edition": "No. 041 / 130"}, {"no": 42, "key": "150_韩信", "name": "韩信", "title": "国士无双", "edition": "No. 042 / 130"}, {"no": 43, "key": "152_王昭君", "name": "王昭君", "title": "冰雪之华", "edition": "No. 043 / 130"}, {"no": 44, "key": "153_兰陵王", "name": "兰陵王", "title": "暗影刀锋", "edition": "No. 044 / 130"}, {"no": 45, "key": "154_花木兰", "name": "花木兰", "title": "传说之刃", "edition": "No. 045 / 130"}, {"no": 46, "key": "156_张良", "name": "张良", "title": "言灵之书", "edition": "No. 046 / 130"}, {"no": 47, "key": "157_不知火舞", "name": "不知火舞", "title": "明媚烈焰", "edition": "No. 047 / 130"}, {"no": 48, "key": "162_娜可露露", "name": "娜可露露", "title": "鹰之守护", "edition": "No. 048 / 130"}, {"no": 49, "key": "163_橘右京", "name": "橘右京", "title": "神梦一刀", "edition": "No. 049 / 130"}, {"no": 50, "key": "166_亚瑟", "name": "亚瑟", "title": "圣骑之力", "edition": "No. 050 / 130"}, {"no": 51, "key": "168_牛魔", "name": "牛魔", "title": "精英酋长", "edition": "No. 051 / 130"}, {"no": 52, "key": "169_后羿", "name": "后羿", "title": "半神之弓", "edition": "No. 052 / 130"}, {"no": 53, "key": "170_刘备", "name": "刘备", "title": "仁德义枪", "edition": "No. 053 / 130"}, {"no": 54, "key": "171_张飞", "name": "张飞", "title": "禁血狂兽", "edition": "No. 054 / 130"}, {"no": 55, "key": "173_李元芳", "name": "李元芳", "title": "王都密探", "edition": "No. 055 / 130"}, {"no": 56, "key": "174_虞姬", "name": "虞姬", "title": "森之风灵", "edition": "No. 056 / 130"}, {"no": 57, "key": "175_钟馗", "name": "钟馗", "title": "虚灵城判", "edition": "No. 057 / 130"}, {"no": 58, "key": "178_杨戬", "name": "杨戬", "title": "根源之目", "edition": "No. 058 / 130"}, {"no": 59, "key": "183_雅典娜", "name": "雅典娜", "title": "圣域余晖", "edition": "No. 059 / 130"}, {"no": 60, "key": "184_蔡文姬", "name": "蔡文姬", "title": "天籁弦音", "edition": "No. 060 / 130"}, {"no": 61, "key": "186_太乙真人", "name": "太乙真人", "title": "炼金大师", "edition": "No. 061 / 130"}, {"no": 62, "key": "180_哪吒", "name": "哪吒", "title": "桀骜炎枪", "edition": "No. 062 / 130"}, {"no": 63, "key": "190_诸葛亮", "name": "诸葛亮", "title": "绝代智谋", "edition": "No. 063 / 130"}, {"no": 64, "key": "192_黄忠", "name": "黄忠", "title": "燃魂重炮", "edition": "No. 064 / 130"}, {"no": 65, "key": "191_大乔", "name": "大乔", "title": "沧海之曜", "edition": "No. 065 / 130"}, {"no": 66, "key": "187_东皇太一", "name": "东皇太一", "title": "噬灭日蚀", "edition": "No. 066 / 130"}, {"no": 67, "key": "182_干将莫邪", "name": "干将莫邪", "title": "淬命双剑", "edition": "No. 067 / 130"}, {"no": 68, "key": "189_鬼谷子", "name": "鬼谷子", "title": "万物有灵", "edition": "No. 068 / 130"}, {"no": 69, "key": "193_铠", "name": "铠", "title": "破灭刃锋", "edition": "No. 069 / 130"}, {"no": 70, "key": "196_百里守约", "name": "百里守约", "title": "静谧之眼", "edition": "No. 070 / 130"}, {"no": 71, "key": "195_百里玄策", "name": "百里玄策", "title": "嚣狂之镰", "edition": "No. 071 / 130"}, {"no": 72, "key": "194_苏烈", "name": "苏烈", "title": "不屈铁壁", "edition": "No. 072 / 130"}, {"no": 73, "key": "198_梦奇", "name": "梦奇", "title": "入梦之灵", "edition": "No. 073 / 130"}, {"no": 74, "key": "179_女娲", "name": "女娲", "title": "至高创世", "edition": "No. 074 / 130"}, {"no": 75, "key": "501_明世隐", "name": "明世隐", "title": "灵魂劫卜", "edition": "No. 075 / 130"}, {"no": 76, "key": "199_公孙离", "name": "公孙离", "title": "幻舞玲珑", "edition": "No. 076 / 130"}, {"no": 77, "key": "176_杨玉环", "name": "杨玉环", "title": "霓裳风华", "edition": "No. 077 / 130"}, {"no": 78, "key": "502_裴擒虎", "name": "裴擒虎", "title": "六合虎拳", "edition": "No. 078 / 130"}, {"no": 79, "key": "197_弈星", "name": "弈星", "title": "天元之弈", "edition": "No. 079 / 130"}, {"no": 80, "key": "503_狂铁", "name": "狂铁", "title": "战车意志", "edition": "No. 080 / 130"}, {"no": 81, "key": "504_米莱狄", "name": "米莱狄", "title": "筑城者", "edition": "No. 081 / 130"}, {"no": 82, "key": "125_元歌", "name": "元歌", "title": "无间傀儡", "edition": "No. 082 / 130"}, {"no": 83, "key": "510_孙策", "name": "孙策", "title": "光明之海", "edition": "No. 083 / 130"}, {"no": 84, "key": "137_司马懿", "name": "司马懿", "title": "寂灭之心", "edition": "No. 084 / 130"}, {"no": 85, "key": "509_盾山", "name": "盾山", "title": "无尽之盾", "edition": "No. 085 / 130"}, {"no": 86, "key": "508_伽罗", "name": "伽罗", "title": "破魔之箭", "edition": "No. 086 / 130"}, {"no": 87, "key": "312_沈梦溪", "name": "沈梦溪", "title": "爆弹怪猫", "edition": "No. 087 / 130"}, {"no": 88, "key": "507_李信", "name": "李信", "title": "谋世之战", "edition": "No. 088 / 130"}, {"no": 89, "key": "513_上官婉儿", "name": "上官婉儿", "title": "惊鸿之笔", "edition": "No. 089 / 130"}, {"no": 90, "key": "515_嫦娥", "name": "嫦娥", "title": "寒月公主", "edition": "No. 090 / 130"}, {"no": 91, "key": "511_猪八戒", "name": "猪八戒", "title": "无忧猛士", "edition": "No. 091 / 130"}, {"no": 92, "key": "529_盘古", "name": "盘古", "title": "破晓之神", "edition": "No. 092 / 130"}, {"no": 93, "key": "505_瑶", "name": "瑶", "title": "鹿灵守心", "edition": "No. 093 / 130"}, {"no": 94, "key": "506_云中君", "name": "云中君", "title": "流云之翼", "edition": "No. 094 / 130"}, {"no": 95, "key": "522_曜", "name": "曜", "title": "星辰之子", "edition": "No. 095 / 130"}, {"no": 96, "key": "518_马超", "name": "马超", "title": "冷晖之枪", "edition": "No. 096 / 130"}, {"no": 97, "key": "523_西施", "name": "西施", "title": "幻纱之灵", "edition": "No. 097 / 130"}, {"no": 98, "key": "525_鲁班大师", "name": "鲁班大师", "title": "神匠", "edition": "No. 098 / 130"}, {"no": 99, "key": "524_蒙犽", "name": "蒙犽", "title": "烈炮小子", "edition": "No. 099 / 130"}, {"no": 100, "key": "531_镜", "name": "镜", "title": "破镜之刃", "edition": "No. 100 / 130"}, {"no": 101, "key": "527_蒙恬", "name": "蒙恬", "title": "秩序统将", "edition": "No. 101 / 130"}, {"no": 102, "key": "533_阿古朵", "name": "阿古朵", "title": "山林之子", "edition": "No. 102 / 130"}, {"no": 103, "key": "536_夏洛特", "name": "夏洛特", "title": "玫瑰剑士", "edition": "No. 103 / 130"}, {"no": 104, "key": "528_澜", "name": "澜", "title": "鲨之猎刃", "edition": "No. 104 / 130"}, {"no": 105, "key": "537_司空震", "name": "司空震", "title": "雷霆之王", "edition": "No. 105 / 130"}, {"no": 106, "key": "155_艾琳", "name": "艾琳", "title": "精灵之舞", "edition": "No. 106 / 130"}, {"no": 107, "key": "538_云缨", "name": "云缨", "title": "燎原之心", "edition": "No. 107 / 130"}, {"no": 108, "key": "540_金蝉", "name": "金蝉", "title": "渡世行者", "edition": "No. 108 / 130"}, {"no": 109, "key": "542_暃", "name": "暃", "title": "玉城之子", "edition": "No. 109 / 130"}, {"no": 110, "key": "534_桑启", "name": "桑启", "title": "萤火之旅", "edition": "No. 110 / 130"}, {"no": 111, "key": "548_戈娅", "name": "戈娅", "title": "沙海飞舟", "edition": "No. 111 / 130"}, {"no": 112, "key": "521_海月", "name": "海月", "title": "永夜之心", "edition": "No. 112 / 130"}, {"no": 113, "key": "544_赵怀真", "name": "赵怀真", "title": "自在之心", "edition": "No. 113 / 130"}, {"no": 114, "key": "545_莱西奥", "name": "莱西奥", "title": "火鹰船长", "edition": "No. 114 / 130"}, {"no": 115, "key": "564_姬小满", "name": "姬小满", "title": "武道奇才", "edition": "No. 115 / 130"}, {"no": 116, "key": "514_亚连", "name": "亚连", "title": "追忆之刃", "edition": "No. 116 / 130"}, {"no": 117, "key": "563_海诺", "name": "海诺", "title": "命运之引", "edition": "No. 117 / 130"}, {"no": 118, "key": "519_敖隐", "name": "敖隐", "title": "凌霄真龙", "edition": "No. 118 / 130"}, {"no": 119, "key": "517_大司命", "name": "大司命", "title": "肃归之戈", "edition": "No. 119 / 130"}, {"no": 120, "key": "582_元流之子(法师)", "name": "元流之子(法师)", "title": "万妙之心", "edition": "No. 120 / 130"}, {"no": 121, "key": "581_元流之子(坦克)", "name": "元流之子(坦克)", "title": "止戈之道", "edition": "No. 121 / 130"}, {"no": 122, "key": "577_少司缘", "name": "少司缘", "title": "聆愿之祝", "edition": "No. 122 / 130"}, {"no": 123, "key": "558_影", "name": "影", "title": "黯羽东君", "edition": "No. 123 / 130"}, {"no": 124, "key": "177_苍", "name": "苍", "title": "苍狼末裔", "edition": "No. 124 / 130"}, {"no": 125, "key": "550_空空儿", "name": "空空儿", "title": "笑面诡手", "edition": "No. 125 / 130"}, {"no": 126, "key": "584_元流之子(射手)", "name": "元流之子(射手)", "title": "沉舟之志", "edition": "No. 126 / 130"}, {"no": 127, "key": "151_孙权", "name": "孙权", "title": "定旌之谋", "edition": "No. 127 / 130"}, {"no": 128, "key": "172_蚩奼", "name": "蚩奼", "title": "五兵之主", "edition": "No. 128 / 130"}, {"no": 129, "key": "585_元流之子(辅助)", "name": "元流之子(辅助)", "title": "守望之诺", "edition": "No. 129 / 130"}, {"no": 130, "key": "583_元流之子(刺客)", "name": "元流之子(刺客)", "title": "守望之诺", "edition": "No. 130 / 130"}];
+  // heroes.json 已内联：file:// 下 fetch 会被 CORS 拦掉，页面会只剩空网格
+
+  heroes.forEach(h => {
+    const el = document.createElement('div');
+    el.className = 'item';
+    el.dataset.key = h.key;
+    el.innerHTML = '<img loading="lazy" src="viewer/thumb/' + h.key + '.webp' + V +
+                   '" alt=""><b>' + h.name + '</b><span>' + (h.title || '') + '</span>';
+    el.onclick = () => select(h, el);
+    grid.appendChild(el);
+  });
+
+  let renderer = null, dirty = true, seq = 0;
+  let mx = -5, my = -12, tx = -5, ty = -12, base = 0;
+  let down = false, ptr = null, px = 0, py = 0, sx = 0, sy = 0, moved = false;
+  let depth = 0, glow = 0.15, reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  async function select(h, el) {
+    document.querySelectorAll('.item.sel').forEach(e => e.classList.remove('sel'));
+    el.classList.add('sel');
+    tname.textContent = h.name;
+    tmeta.textContent = (h.title ? h.title + ' · ' : '') + h.edition;
+    status.textContent = '加载中 …';
+    const mySeq = ++seq;
+    const assets = {
+      character: 'layers/' + h.key + '/character.webp' + V,
+      background: 'shared/background.webp' + V,
+      ui: 'layers/' + h.key + '/ui.webp' + V,
+      structure: 'layers/' + h.key + '/structure.webp' + V,
+    };
+    try {
+      // 每张卡换一个新 canvas：旧 WebGL 上下文随之释放，避免切 130 张后资源堆积
+      const old = front.querySelector('canvas');
+      const nc = document.createElement('canvas');
+      nc.id = 'cv';
+      front.replaceChild(nc, old);
+      const r = await createCardRenderer(nc, assets);
+      if (mySeq !== seq) return;          // 期间又切了别的英雄，丢弃
+      renderer = r;
+      dirty = true;
+      status.textContent = '';
+    } catch (e) {
+      status.textContent = '加载失败：' + e.message;
+    }
+  }
+
+  card.addEventListener('pointerdown', e => {
+    if (ptr !== null) return;
+    ptr = e.pointerId; down = true; moved = false;
+    px = sx = e.clientX; py = sy = e.clientY;
+    try { card.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  card.addEventListener('pointermove', e => {
+    if (!down || ptr !== e.pointerId) return;
+    if (Math.hypot(e.clientX - sx, e.clientY - sy) > 5) moved = true;
+    ty += (e.clientX - px) * 0.62;
+    tx = Math.max(-50, Math.min(50, tx - (e.clientY - py) * 0.3));
+    px = e.clientX; py = e.clientY;
+  });
+  const end = e => {
+    if (ptr !== e.pointerId) return;
+    ptr = null; down = false;
+    if (card.hasPointerCapture && card.hasPointerCapture(e.pointerId)) card.releasePointerCapture(e.pointerId);
+    if (!moved) flip(); else base = Math.round(ty / 180) * 180;
+  };
+  card.addEventListener('pointerup', end);
+  card.addEventListener('pointercancel', e => { ptr = null; down = false; base = Math.round(ty / 180) * 180; });
+
+  function flip() { ty = base + 180; base += 180; }
+  document.getElementById('flip').onclick = () => flip();
+  document.getElementById('recenter').onclick = () => { tx = -5; ty = base; };
+  document.getElementById('depth').oninput = e => {
+    depth = Number(e.target.value);
+    document.getElementById('odepth').value = (depth > 0 ? '+' : '') + depth.toFixed(2) + '×';
+    dirty = true;
+  };
+  document.getElementById('glow').oninput = e => {
+    glow = Number(e.target.value);
+    document.getElementById('oglow').value = glow.toFixed(2) + '×';
+    dirty = true;
+  };
+
+  const ease = reduced ? 1 : 0.115;
+  let lastX = 999, lastY = 999;
+  function frame() {
+    mx += (tx - mx) * ease;
+    my += (ty - my) * ease;
+    card.style.transform = 'rotateX(' + mx + 'deg) rotateY(' + my + 'deg)';
+    const vis = Math.cos(my * Math.PI / 180) * Math.cos(mx * Math.PI / 180) > 0.001;
+    front.style.visibility = vis ? 'visible' : 'hidden';
+    back.style.visibility = vis ? 'hidden' : 'visible';
+    // 旋转过程中必须持续重绘。漏掉这一条，画面就只在滑块变化时更新一次，
+    // 拖拽时人物与背景看起来是死的（视差、彩虹高光、轮廓光全都不动）。
+    if (renderer && vis && (dirty || Math.abs(mx - lastX) > 0.015 || Math.abs(my - lastY) > 0.015)) {
+      renderer.draw(mx, my, 1, depth, glow);
+      dirty = false;
+      lastX = mx; lastY = my;
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
