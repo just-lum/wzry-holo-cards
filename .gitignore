@@ -1,0 +1,4 @@
+node_modules/
+.verification/
+__pycache__/
+*.pyc
