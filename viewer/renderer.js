@@ -65,7 +65,14 @@ const blurFragment = `precision highp float; varying vec2 uv;uniform sampler2D s
 vec3 decodeHDR(vec4 c){return c.rgb*c.a*64.;}
 vec4 encodeHDR(vec3 c){float m=clamp(ceil(max(max(c.r,c.g),c.b)/64.*255.)/255.,1./255.,1.);return vec4(c/(64.*m),m);}
 void main(){vec3 c=vec3(0.);float total=0.;for(int i=-4;i<=4;i++){float f=float(i);float w=exp(-f*f/8.);c+=decodeHDR(texture2D(source,uv+stepSize*f))*w;total+=w;}gl_FragColor=encodeHDR(c/total);}`;
-async function createCardRenderer(canvas, assets) {
+/**
+ * One WebGL context per viewer. Asset changes are atomic; superseded work
+ * resolves false, external cancellation rejects AbortError, and a current
+ * failure leaves the previous card usable. The app recreates this renderer
+ * after webglcontextrestored rather than reusing invalid GL handles.
+ * options.loadTimeoutMs bounds each selection's image loading (default 15000).
+ */
+async function createCardRenderer(canvas, assets, options = {}) {
   const gl = canvas.getContext('webgl', {
     alpha: true,
     premultipliedAlpha: true,
@@ -74,132 +81,273 @@ async function createCardRenderer(canvas, assets) {
     preserveDrawingBuffer: true,
   });
   if (!gl) throw new Error('WebGL unavailable');
-  const shaders = [],
-    programs = [],
-    textures = [],
-    frames = [];
-  const buffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  gl.bufferData(
-    gl.ARRAY_BUFFER,
-    new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]),
-    gl.STATIC_DRAW,
+  const shaders = new Set(), programs = new Set();
+  const textures = new Set(), frames = new Set();
+  const names = ['character', 'background', 'ui', 'structure'];
+  let buffer, scene, blur, sceneU, step;
+  let disposed = false, lost = false, pending = null;
+  let artwork = [], targets = [], size = null, aspect = 1.486;
+  let quality = options.quality ?? 'auto';
+  const loadTimeoutMs = options.loadTimeoutMs === undefined ? 15000 : options.loadTimeoutMs;
+  const positions = new Map();
+  const maxSize = Math.min(
+    gl.getParameter(gl.MAX_TEXTURE_SIZE) || 4096,
+    gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) || 4096,
   );
+
+  function available() { return !disposed && !lost && !gl.isContextLost(); }
+  function abortError() { return new DOMException('Asset loading cancelled', 'AbortError'); }
+  function invalidate() {
+    // A consumer callback must not turn a successful GPU commit into a failure.
+    try { options.onInvalidate?.(); } catch (error) { console.error(error); }
+  }
+  function own(set, value, label) {
+    if (!value) throw new Error('Unable to allocate ' + label);
+    set.add(value);
+    return value;
+  }
+  function deleteTexture(t) {
+    if (textures.delete(t)) gl.deleteTexture(t);
+  }
+  function deleteTargets(list) {
+    list.forEach(({ t, f }) => {
+      if (frames.delete(f)) gl.deleteFramebuffer(f);
+      deleteTexture(t);
+    });
+  }
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    pending?.cancel('disposed');
+    canvas.removeEventListener('webglcontextlost', contextLost);
+    frames.forEach((f) => gl.deleteFramebuffer(f));
+    textures.forEach((t) => gl.deleteTexture(t));
+    programs.forEach((p) => gl.deleteProgram(p));
+    shaders.forEach((s) => gl.deleteShader(s));
+    if (buffer) gl.deleteBuffer(buffer);
+    frames.clear(); textures.clear(); programs.clear(); shaders.clear();
+    artwork = []; targets = [];
+  }
+  function contextLost(event) {
+    event.preventDefault();
+    lost = true;
+    pending?.cancel('lost');
+  }
   function compile(type, source) {
-    const shader = gl.createShader(type);
+    const shader = own(shaders, gl.createShader(type), 'shader');
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
     if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS))
       throw new Error(gl.getShaderInfoLog(shader) || 'Shader error');
-    shaders.push(shader);
     return shader;
   }
-  function program(source) {
-    const p = gl.createProgram();
-    gl.attachShader(p, compile(gl.VERTEX_SHADER, vertex));
+  function program(source, vertexShader) {
+    const p = own(programs, gl.createProgram(), 'shader program');
+    gl.attachShader(p, vertexShader);
     gl.attachShader(p, compile(gl.FRAGMENT_SHADER, source));
     gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS))
-      throw new Error('Shader link error');
-    programs.push(p);
+      throw new Error(gl.getProgramInfoLog(p) || 'Shader link error');
+    positions.set(p, gl.getAttribLocation(p, 'position'));
     return p;
   }
-  const scene = program(fragment),
-    blur = program(blurFragment);
   function use(p) {
     gl.useProgram(p);
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    const a = gl.getAttribLocation(p, 'position');
+    const a = positions.get(p);
     gl.enableVertexAttribArray(a);
     gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0);
   }
   function texture(filter) {
-    const t = gl.createTexture();
-    textures.push(t);
-    gl.bindTexture(gl.TEXTURE_2D, t);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    return t;
+    const t = own(textures, gl.createTexture(), 'texture');
+    try {
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      return t;
+    } catch (error) {
+      deleteTexture(t);
+      throw error;
+    }
   }
-  const images = await Promise.all(
-    ['character', 'background', 'ui', 'structure'].map(
-      (name) =>
-        new Promise((resolve, reject) => {
-          const image = new Image();
-          image.onload = () => resolve(image);
-          image.onerror = () => reject(new Error('Asset unavailable'));
-          image.src = assets[name];
-        }),
-    ),
-  );
-  const artTextures = images.map((image) => {
-    const t = texture(gl.LINEAR);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
-    return t;
-  });
-  // Full-resolution artwork and line core; bloom only is computed at half/quarter resolution.
-  canvas.width = window.innerWidth < 640 ? 1036 : 1408;
-  canvas.height = Math.round(
-    canvas.width * (assets ? images[0].height / images[0].width : 1.4),
-  );
-  function target(scale) {
-    const w = Math.round(canvas.width * scale),
-      h = Math.round(canvas.height * scale);
-    const t = texture(gl.NEAREST);
-    gl.texImage2D(
-      gl.TEXTURE_2D,
-      0,
-      gl.RGBA,
-      w,
-      h,
-      0,
-      gl.RGBA,
-      gl.UNSIGNED_BYTE,
-      null,
-    );
-    const f = gl.createFramebuffer();
-    frames.push(f);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, f);
-    gl.framebufferTexture2D(
-      gl.FRAMEBUFFER,
-      gl.COLOR_ATTACHMENT0,
-      gl.TEXTURE_2D,
-      t,
-      0,
-    );
-    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE)
-      throw new Error('Bloom framebuffer unavailable');
-    return { t, f, w, h };
+  function checkError(message) {
+    if (gl.getError() !== gl.NO_ERROR) throw new Error(message);
   }
-  const emission = target(0.5),
-    temp = target(0.5),
-    near = target(0.5),
-    wideTemp = target(0.25),
-    wide = target(0.25);
-  const sceneU = {
-    view: gl.getUniformLocation(scene, 'view'),
-    power: gl.getUniformLocation(scene, 'power'),
-    depth: gl.getUniformLocation(scene, 'depth'),
-    contourBrightness: gl.getUniformLocation(scene, 'contourBrightness'),
-    pass: gl.getUniformLocation(scene, 'glowPass'),
-  };
-  use(scene);
-  gl.uniform1f(
-    gl.getUniformLocation(scene, 'cardAspect'),
-    canvas.height / canvas.width,
-  );
-  gl.uniform1f(gl.getUniformLocation(scene, 'extracted'), assets ? 1 : 0);
-  gl.uniform1i(gl.getUniformLocation(scene, 'structureTex'), 5);
-  gl.uniform1f(gl.getUniformLocation(scene, 'pixelWidth'), 1 / canvas.width);
-  ['art', 'bg', 'uiTex', 'bloomNear', 'bloomWide'].forEach((name, i) =>
-    gl.uniform1i(gl.getUniformLocation(scene, name), i),
-  );
-  use(blur);
-  gl.uniform1i(gl.getUniformLocation(blur, 'source'), 0);
-  const step = gl.getUniformLocation(blur, 'stepSize');
+  function target(scale, width, height) {
+    const w = Math.max(1, Math.round(width * scale));
+    const h = Math.max(1, Math.round(height * scale));
+    let t, f;
+    try {
+      t = texture(gl.NEAREST);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      checkError('Bloom framebuffer allocation failed');
+      f = own(frames, gl.createFramebuffer(), 'bloom framebuffer');
+      gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE)
+        throw new Error('Bloom framebuffer unavailable');
+      return { t, f, w, h };
+    } catch (error) {
+      if (f && frames.delete(f)) gl.deleteFramebuffer(f);
+      if (t) deleteTexture(t);
+      throw error;
+    }
+  }
+  function positive(value) { return Number.isFinite(value) && value > 0; }
+  function dimensions(config, imageAspect) {
+    const nextQuality = config.quality ?? quality;
+    if (!['auto', 'high', 'low'].includes(nextQuality)) throw new RangeError('Unknown rendering quality');
+    const dpr = positive(config.dpr) ? config.dpr : (window.devicePixelRatio || 1);
+    const ratio = Math.min(dpr, nextQuality === 'low' ? 1 : nextQuality === 'high' ? 2 : 1.5);
+    const fallbackWidth = window.innerWidth < 640 ? 1036 : 1408;
+    // clientWidth is the untransformed 160% overscan canvas, not its rotated bounds.
+    const cssWidth = positive(config.cssWidth) ? config.cssWidth
+      : canvas.clientWidth || size?.cssWidth || fallbackWidth / ratio;
+    const cssHeight = positive(config.cssHeight) ? config.cssHeight
+      : canvas.clientHeight || (size?.cssHeight && size.cssHeight) || cssWidth * imageAspect;
+    let width = Math.max(1, Math.round(cssWidth * ratio));
+    let height = Math.max(1, Math.round(cssHeight * ratio));
+    const widthLimit = nextQuality === 'low' ? 896 : nextQuality === 'high' ? 2048 : 1408;
+    const scale = Math.min(1, widthLimit / width, maxSize / Math.max(width, height));
+    width = Math.max(1, Math.floor(width * scale));
+    height = Math.max(1, Math.floor(height * scale));
+    return { width, height, cssWidth, cssHeight, dpr, quality: nextQuality };
+  }
+  function resizeInternal(config = {}, imageAspect = aspect, notify = true) {
+    if (!available()) return false;
+    const next = dimensions(config, imageAspect);
+    if (size && size.width === next.width && size.height === next.height) {
+      size = next;
+      quality = next.quality;
+      return false;
+    }
+    const staged = [];
+    try {
+      // Keep the same two-scale bloom pipeline and shader math at every quality.
+      [0.5, 0.5, 0.5, 0.25, 0.25].forEach((scale) => staged.push(target(scale, next.width, next.height)));
+    } catch (error) {
+      deleteTargets(staged);
+      throw error;
+    }
+    const previous = targets;
+    targets = staged;
+    size = next;
+    quality = next.quality;
+    canvas.width = next.width;
+    canvas.height = next.height;
+    deleteTargets(previous);
+    if (notify) invalidate();
+    return true;
+  }
+
+  function loadImage(url, name, request) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      const item = { image, reject, name, settled: false };
+      request.images.push(item);
+      image.crossOrigin = 'anonymous';
+      image.onload = () => {
+        item.settled = true;
+        image.onload = image.onerror = null;
+        if (!image.width || !image.height) reject(new Error('Empty ' + name + ' image'));
+        else resolve(image);
+      };
+      image.onerror = () => {
+        item.settled = true;
+        image.onload = image.onerror = null;
+        reject(new Error('Unable to load ' + name + ' image'));
+      };
+      image.src = url;
+    });
+  }
+
+  async function setAssets(nextAssets, { signal } = {}) {
+    if (disposed) throw new DOMException('Renderer disposed', 'InvalidStateError');
+    if (!available()) throw new Error('WebGL context lost; recreate the renderer');
+    if (signal?.aborted) throw abortError();
+    names.forEach((name) => {
+      if (typeof nextAssets?.[name] !== 'string' || !nextAssets[name].trim())
+        throw new TypeError('Missing ' + name + ' image URL');
+    });
+    // Snapshot URLs before awaiting so callers cannot mutate an active request.
+    const urls = names.map((name) => nextAssets[name]);
+    pending?.cancel('superseded');
+    const request = {
+      images: [], reason: null, error: null, timer: null,
+      cancel(reason, error = abortError()) {
+        if (this.reason) return;
+        this.reason = reason;
+        this.error = error;
+        clearTimeout(this.timer);
+        this.timer = null;
+        this.images.forEach(({ image, reject }) => {
+          image.onload = image.onerror = null;
+          image.src = '';
+          reject(error);
+        });
+      },
+    };
+    pending = request;
+    const externalAbort = () => request.cancel('external');
+    signal?.addEventListener('abort', externalAbort, { once: true });
+    const reused = urls.map((url, i) => artwork[i]?.url === url ? artwork[i] : null);
+    const staged = [];
+    try {
+      const loading = Promise.all(urls.map((url, i) => reused[i] || loadImage(url, names[i], request)));
+      request.timer = setTimeout(() => {
+        const waiting = request.images.filter((item) => !item.settled).map((item) => item.name);
+        if (!waiting.length) return;
+        const error = new Error('Timed out loading ' + waiting.join(', ') + ' image after ' + loadTimeoutMs + ' ms');
+        error.name = 'TimeoutError';
+        request.cancel('timeout', error);
+      }, loadTimeoutMs);
+      const images = await loading;
+      clearTimeout(request.timer);
+      request.timer = null;
+      if (request.reason) {
+        if (request.reason === 'external' || request.reason === 'timeout') throw request.error;
+        return false;
+      }
+      if (!available()) { request.cancel('lost'); return false; }
+      const nextArtwork = images.map((image, i) => {
+        if (reused[i]) return reused[i];
+        const t = texture(gl.LINEAR);
+        staged.push(t);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+        checkError('Unable to upload ' + names[i] + ' texture');
+        return { t, url: urls[i], width: image.width, height: image.height };
+      });
+      const nextAspect = nextArtwork[0].height / nextArtwork[0].width;
+      // A selection must not silently undo an explicit ResizeObserver/DPR size.
+      resizeInternal(size ? {
+        cssWidth: size.cssWidth, cssHeight: size.cssHeight, dpr: size.dpr,
+      } : {}, nextAspect, false);
+      const previous = artwork;
+      artwork = nextArtwork;
+      aspect = nextAspect;
+      previous.forEach((item) => { if (!artwork.includes(item)) deleteTexture(item.t); });
+      staged.length = 0;
+      invalidate();
+      return true;
+    } catch (error) {
+      staged.forEach(deleteTexture);
+      if (request.reason === 'timeout') throw request.error;
+      if (request.reason && request.reason !== 'external') return false;
+      if (request.reason === 'external') throw abortError();
+      request.cancel('failure');
+      throw error;
+    } finally {
+      clearTimeout(request.timer);
+      request.timer = null;
+      signal?.removeEventListener('abort', externalAbort);
+      request.images.length = 0;
+      if (pending === request) pending = null;
+    }
+  }
   function bind(t, unit = 0) {
     gl.activeTexture(gl.TEXTURE0 + unit);
     gl.bindTexture(gl.TEXTURE_2D, t);
@@ -212,12 +360,16 @@ async function createCardRenderer(canvas, assets) {
     gl.uniform2f(step, x / src.w, y / src.h);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
   }
-  return {
+  const renderer = {
     draw(x, y, strength, depth = 0, contourBrightness = 0.15) {
+      if (!available() || !artwork.length || !targets.length) return false;
+      const [emission, temp, near, wideTemp, wide] = targets;
       use(scene);
-      artTextures.forEach((t, i) => bind(t, i === 3 ? 5 : i));
+      artwork.forEach(({ t }, i) => bind(t, i === 3 ? 5 : i));
       bind(near.t, 3);
       bind(wide.t, 4);
+      gl.uniform1f(sceneU.cardAspect, canvas.height / canvas.width);
+      gl.uniform1f(sceneU.pixelWidth, 1 / canvas.width);
       gl.uniform2f(
         sceneU.view,
         Math.sin((y * Math.PI) / 180) * 0.65,
@@ -235,22 +387,48 @@ async function createCardRenderer(canvas, assets) {
       blurPass(near, wideTemp, 5, 0);
       blurPass(wideTemp, wide, 0, 2.5);
       use(scene);
-      artTextures.forEach((t, i) => bind(t, i === 3 ? 5 : i));
+      artwork.forEach(({ t }, i) => bind(t, i === 3 ? 5 : i));
       bind(near.t, 3);
       bind(wide.t, 4);
       gl.uniform1f(sceneU.pass, 0);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
+      return true;
     },
-    dispose() {
-      frames.forEach((f) => gl.deleteFramebuffer(f));
-      textures.forEach((t) => gl.deleteTexture(t));
-      shaders.forEach((s) => gl.deleteShader(s));
-      programs.forEach((p) => gl.deleteProgram(p));
-      gl.deleteBuffer(buffer);
-    },
+    setAssets,
+    resize: (config) => resizeInternal(config),
+    dispose,
   };
+  try {
+    if (!['auto', 'high', 'low'].includes(quality)) throw new RangeError('Unknown rendering quality');
+    if (!positive(loadTimeoutMs)) throw new RangeError('loadTimeoutMs must be a positive finite duration');
+    buffer = gl.createBuffer();
+    if (!buffer) throw new Error('Unable to allocate vertex buffer');
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
+    const vertexShader = compile(gl.VERTEX_SHADER, vertex);
+    scene = program(fragment, vertexShader);
+    blur = program(blurFragment, vertexShader);
+    sceneU = {};
+    ['view', 'power', 'depth', 'contourBrightness', 'cardAspect', 'pixelWidth'].forEach((name) => {
+      sceneU[name] = gl.getUniformLocation(scene, name);
+    });
+    sceneU.pass = gl.getUniformLocation(scene, 'glowPass');
+    use(scene);
+    gl.uniform1f(gl.getUniformLocation(scene, 'extracted'), 1);
+    gl.uniform1i(gl.getUniformLocation(scene, 'structureTex'), 5);
+    ['art', 'bg', 'uiTex', 'bloomNear', 'bloomWide'].forEach((name, i) => gl.uniform1i(gl.getUniformLocation(scene, name), i));
+    use(blur);
+    gl.uniform1i(gl.getUniformLocation(blur, 'source'), 0);
+    step = gl.getUniformLocation(blur, 'stepSize');
+    canvas.addEventListener('webglcontextlost', contextLost);
+    if (assets) await setAssets(assets);
+    return renderer;
+  } catch (error) {
+    dispose();
+    throw error;
+  }
 }
 
 globalThis.HOLO_CREATE_RENDERER=createCardRenderer;
