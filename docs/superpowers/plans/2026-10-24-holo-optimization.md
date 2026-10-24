@@ -66,4 +66,3 @@ Consumes Task 1/2 APIs. App owns status, selected hero, favorites, URL, animatio
 - [x] Independently review current diff, reproduce/fix material findings, rerun affected checks.
 - [x] Record actual before/after measurements and screenshots with limitations.
 - [x] Open the working preview and provide branch/source/test evidence for review.
-
