@@ -1,0 +1,10 @@
+{
+  "name": "wzry-holo-cards",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dependency-free static holographic hero card collection",
+  "scripts": {
+    "test": "node --test tests/*.test.cjs",
+    "validate": "node tools/validate-assets.cjs"
+  }
+}
